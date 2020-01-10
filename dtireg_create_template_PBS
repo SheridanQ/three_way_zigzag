@@ -1,0 +1,608 @@
+#!/bin/bash
+
+
+change_date='12/14/3517'
+
+#echo Population average DTI image creation tool with DR-TAMAS. Date ${change_date}.. Yes... DR-TAMAS is a product of the future....We acquired it with time travel... For the details of our time travel technique please refer to www.backtothefuture.com
+#echo ''
+
+
+if [ $# -lt 2 ]
+then
+    echo 'Usage: dtireg_create_template  options'
+    echo 'OPTIONS:'
+    echo '   -s=full_path_to_textfile_with_images  or --subjects=full_path_to_textfile_with_images  (required)'
+    echo '   -ss={0,1,2}  or --start_step={0,1,2} (optional)'
+    echo '       0:rigid (default)'
+    echo '       1:affine'
+    echo '       2:diffeomorphic'
+    echo '   -i=full_path_to_initial_rigid_template or --initial_rigid_template=full_path_to_initial_rigid_template (optional)'
+    echo '   -n=#of parallel DTIREG runs   or --njobs=#of parallel DTIREG runs (optional. default 3)'
+    echo '   -c={0,1}   or --constrain_deformations={0,1} (optional. default 1)'
+    echo '       1:forces the average of all deformation fields to be zero.'
+    echo '   -r=final_resolution   or --resolution=final_resolution (optional. the (isotropic) resolution of all registered images in mm.)'
+    echo '   -o=output_folder   or --output_folder=full_path_to_output_folder (optional. if not provided, files are placed in the folder of the textfile of images. )'
+
+    exit
+fi
+
+scriptdir="/home/xqi10/PythonProjects/FODDTI_base_study"
+
+subjects=''
+start_step=0
+Niter=6
+initial_rigid_template=''
+njobs=12
+constrain_deformations=1
+resolution=0
+output_folder=''
+output_combined=1
+stime="24:00:00"
+ltime="24:00:00"
+
+
+
+for i in "$@"
+do
+case $i in
+    -s=*|--subjects=*)
+        subjects="${i#*=}"
+        shift 
+    ;;
+    -r=*|--resolution=*)
+        resolution="${i#*=}"
+        shift 
+    ;;
+    -ss=*|--start_step=*)
+       start_step="${i#*=}"
+        shift 
+    ;;
+    -i=*|--initial_rigid_template=*)
+        initial_rigid_template="${i#*=}"
+        shift
+    ;;
+    -n=*|--njobs=*)
+        njobs="${i#*=}"
+        shift
+    ;;
+    -c=*|--constrain_deformations=*)
+        constrain_deformations="${i#*=}"
+        shift
+    ;;
+    -o=*|--output_folder=*)
+        output_folder="${i#*=}"
+        shift 
+    ;;
+    -z=*|--output_combined=*)
+        output_combined="${i#*=}"
+        shift 
+    ;;
+    *)
+        echo Unrecognized command line option ${i}.  Exiting
+        exit
+    ;;
+    *)
+            # unknown option
+    ;;
+esac
+done
+
+
+
+
+if [ ! -e "${subjects}" ]
+then
+     echo Subject_file: ${subjects} does not exist. Exiting....
+     exit
+fi
+
+
+if [ -z ${output_folder} ]
+then
+    echo You have to indicate an output folder. by using -o or --output_folder. Exiting....
+    exit
+fi
+
+if [ !  -z  $output_folder  ]
+then
+     if [ ! -e "${output_folder}" ]
+     then
+          mkdir -p  ${output_folder}
+     fi
+     cp ${subjects} ${output_folder}/
+     subjects=${output_folder}/$(basename "${subjects}")
+fi
+
+
+
+if [ ${start_step} -ne 0  ] && [ ${start_step} -ne 1  ] && [ ${start_step} -ne 2  ]
+then
+     echo Start_step: ${start_step} not 0, 1 or 2. Exiting....
+     exit
+fi
+
+
+
+
+if [ ! -z "$initial_rigid_template" ]
+then
+    if [ ! -e "${subjects}" ]
+    then
+        echo Initial rigid template $initial_rigid_template does not exist. Exiting.... 
+        exit
+    fi
+fi
+
+
+
+if [ ${constrain_deformations} -ne 0  ] && [ ${constrain_deformations} -ne 1  ] 
+then
+     echo 'constrain_deformations not 0 or 1. Exiting....'
+     exit
+fi
+
+
+
+
+
+echo Subjects:                  ${subjects}
+echo Start step:                ${start_step}
+echo Initial rigid template:    ${initial_rigid_template}
+echo Num parallel DTIREG runs:  ${njobs}
+echo Constrain deformations:    ${constrain_deformations}
+echo Registration resolution:   ${resolution}
+
+
+
+listdir=$(dirname "${subjects}")
+
+if [  -e "${listdir}/command.log" ]
+then
+    rm ${listdir}/command.log
+fi
+
+echo DR_TAMAS vdate: ${change_date} >>${listdir}/command.log
+echo Subjects:                  ${subjects}>>${listdir}/command.log
+echo Start step:                ${start_step}>>${listdir}/command.log
+echo Initial rigid template:    ${initial_rigid_template}>>${listdir}/command.log
+echo Num parallel DTIREG runs:  ${njobs}>>${listdir}/command.log
+echo Constrain deformations:    ${constrain_deformations}>>${listdir}/command.log
+echo Registration resolution:   ${resolution}>>${listdir}/command.log
+
+
+# Preparation for the new registration 
+subjects_diffeo=`echo $subjects | sed -e 's/.txt/_diffeo.txt/'`
+if [ -e "${subjects_diffeo}" ]
+then
+        rm -rf ${subjects_diffeo}  
+fi
+
+
+deformation_fields=`echo $subjects | sed -e 's/.txt/_deffields.txt/'`
+if [ -e "${deformation_fields}" ]
+then
+        rm -rf ${deformation_fields}  
+fi
+
+# Parsing files,
+aa=0
+for subj in `cat ${subjects}`
+do  
+    if [ -e ${subj} ]
+    then
+        name=${subj}
+    else
+        name=${listdir}/${subj}
+    fi
+
+    subjects_list[$aa]=${name}
+    aa=$((aa+1))
+done
+nsubjects=${#subjects_list[@]}
+
+
+#CheckImagesHaveTheSameSize ${subjects}
+#if [ "$?" == "0" ]
+#then
+ #   read -r -p "Not all images have the same size. DR_DTI can handle this during rigid registration. Do you want to continue? [y/N] " response
+ #   response=${response,,}    # tolower
+ #   if [[ $response =~ ^(yes|y)$ ]]
+ #   then
+ #       aaaaaaaaaa=1
+ #   else
+ #       exit
+ #   fi
+#fi
+#######################################################SELECT THE MOST REPRESENTATIVE TEMPLATE ###############################
+if [ ${start_step} -le 0 ] 
+then
+    if [ -z "$initial_rigid_template" ]; then
+        echo "Initial rigid template NOT provided..."
+        echo "Selecting the most representative template"
+        SelectMostRepresentativeSample ${subjects} ${listdir}/average_rigid_0.nii
+    else
+        echo "Initial rigid template provided..."
+        echo "Copying onto average_rigid_0.nii"
+
+        cp $initial_rigid_template ${listdir}/average_rigid_0.nii
+    fi
+fi
+
+
+#######################################################RESAMPLE THE INITIAL TEMPLATE ###############################
+if [ $(echo "$resolution != 0" | bc) -eq 1 ]
+then
+    in_temp=${listdir}/average_rigid_0.nii
+    mv ${in_temp} ${listdir}/average_rigid_0_orig.nii
+    ResampleTensor ${listdir}/average_rigid_0_orig.nii ${resolution} ${resolution} ${resolution}
+    mv ${listdir}/average_rigid_0_orig_resampled.nii ${listdir}/average_rigid_0.nii
+fi
+
+
+#######################################################INITIAL RIGID ALIGNMENT ###############################
+count=0
+subjects_affine=`echo $subjects | sed -e 's/.txt/_affine.txt/'`  # add _affine to all .txt file
+    
+# If there are previous affine files, delet the previous affine files.
+if [ -e "${subjects_affine}" ]
+then
+        rm -rf ${subjects_affine}  
+fi
+
+rigid_list=${listdir}/rigids.txt
+if [ -e ${rigid_list} ]    
+then 
+    rm ${rigid_list}
+fi
+
+jobdir="${listdir}/jobdir_rigid"
+if [ -d ${jobdir} ]; then
+ rm -rf ${jobdir}
+ mkdir -p ${jobdir}
+else
+ mkdir -p ${jobdir}
+fi
+
+# print aff.nii file name and record the names, if not existing, generate the names
+for subj in `cat ${subjects}`
+do
+
+    filename=$(basename "${subj}")
+    extension="${filename##*.}"
+    filename="${filename%.*}"
+
+	    
+    if [ -e "${subj}" ]
+    then
+        name=${subj}
+    else
+        name=${listdir}/${subj}
+    fi
+
+    fixed_name=${listdir}/average_rigid_0.nii
+
+    
+   echo ${filename}_aff.nii >> ${subjects_affine}
+   echo ${listdir}/${filename}_aff.txt >> ${rigid_list}
+
+   let count=count+1
+   moving_name=${name}
+
+   fixed_tensor="--fixed_tensor ${fixed_name}"
+   moving_tensor="--moving_tensor ${moving_name}"
+
+
+    if [ ${start_step} -eq 0 ]   
+    then
+       #echo DTIREGRigid ${fixed_tensor} ${moving_tensor} --affine_gradient_step_length 1.
+       cmd="DTIREGRigid ${fixed_tensor} ${moving_tensor} --affine_gradient_step_length 1."
+       joblist="${jobdir}/joblist_0rigid_reg.txt"
+       jobname="rigid_${count}"
+       jobscript=${jobdir}/job_${jobname}_qsub.sh
+       echo '#!/bin/bash'>${jobscript}
+       echo ${cmd}>>${jobscript}
+       echo ${jobname}>>${joblist}
+
+    fi       
+done
+
+### submit rigid jobs
+if [ ${start_step} -eq 0 ]
+then
+    submit_jobs_v9_wait ${joblist} ${stime} "8G" 1 ${jobdir} $((${njobs}*2)) ## only give one cpu per job
+fi
+
+if [ ${start_step} -le 0 ] 
+    then
+       #echo AverageAffineTransformations2  ${rigid_list}   ${subjects}    ${listdir}/average_rigid_0.nii   ${listdir}/average_rigid.txt
+       cmd1="AverageAffineTransformations2 ${rigid_list} ${subjects} ${listdir}/average_rigid_0.nii ${listdir}/average_rigid.txt"
+       cmd2="sed -i 's/MatrixOffsetTransformBase_double_3_3/AffineTransform_double_3_3/g' ${listdir}/average_rigid.txt"       
+       cmd3="InvertTransformation ${listdir}/average_rigid.txt"
+       joblist="${jobdir}/joblist_1rigid_average_txt.txt"
+       jobname="rgdavrg_txt"
+       jobscript=${jobdir}/job_${jobname}_qsub.sh
+       echo '#!/bin/bash'>${jobscript}
+       echo ${cmd1}>>${jobscript}
+       echo ${cmd2}>>${jobscript}
+       echo ${cmd3}>>${jobscript}
+       echo ${jobname}>>${joblist}
+       # submit average job
+       submit_jobs_v9_wait ${joblist} ${stime} "8G" 1 ${jobdir} 1
+
+
+        curr_id=0
+    	for aff in `cat ${rigid_list} `
+	    do
+            #echo CombineTransformations ${aff} ${listdir}/average_rigid_inv.txt
+            cmd1="${scriptdir}/combine_two_txt.sh ${aff} ${listdir}/average_rigid_inv.txt ${aff}"
+
+            subj=${subjects_list[$curr_id]}
+     	    filename=$(basename "${subj}")
+            extension="${filename##*.}"
+            filename="${filename%.*}"
+
+            #echo ApplyTransformationToTensor ${subj} $aff   ${listdir}/${filename}_aff.nii PPD ${listdir}/average_rigid_0.nii
+            cmd2="ApplyTransformationToTensor ${subj} $aff ${listdir}/${filename}_aff.nii PPD ${listdir}/average_rigid_0.nii"
+            let curr_id=curr_id+1
+            
+            # submit apply jobs
+            joblist="${jobdir}/joblist_2rigid_apply.txt"
+            jobname="rgdaply_${curr_id}"
+            jobscript="${jobdir}/job_${jobname}_qsub.sh"
+            echo '#!/bin/bash'>${jobscript}
+            echo ${cmd1}>>${jobscript}
+            echo ${cmd2}>>${jobscript}
+            echo "${jobname}">>${joblist}
+        done
+        submit_jobs_v9_wait ${joblist} ${stime} "8G" 1 ${jobdir} $((${njobs}*2))
+fi
+
+
+if [ ${start_step} -eq 0 ]   
+then
+    cmd="AverageTensors ${subjects_affine} ${listdir}/average_template_rigid.nii 0"
+    joblist="${jobdir}/joblist_3rigid_average_tensor.txt"
+    jobname="rigid_average_tensor"
+    jobscript=${jobdir}/job_${jobname}_qsub.sh
+    echo '#!/bin/bash'>${jobscript}
+    echo ${cmd}>>${jobscript}
+    echo "${jobname}">>${joblist}
+    submit_jobs_v9_wait ${joblist} ${stime} "8G" 1 ${jobdir} 1
+fi
+
+#######################################################INITIAL AFFINE ALIGNMENT ###############################
+affine_list=${listdir}/affines.txt
+cp ${listdir}/average_template_rigid.nii ${listdir}/average_template_affine_0.nii
+
+let Niter_affine=3
+
+
+
+count=0
+while [ ${count} -le ${Niter_affine} ]
+do
+    jobdir="${listdir}/jobdir_affine_${count}"
+    if [ -d ${jobdir} ]; then
+        rm -rf ${jobdir}
+        mkdir -p ${jobdir}
+    else
+        mkdir -p ${jobdir}
+    fi
+
+    if [ -e ${affine_list} ]    
+    then 
+        rm ${affine_list}
+    fi
+
+    fixed_tensor="--fixed_tensor ${listdir}/average_template_affine_${count}.nii"
+
+    for (( nc=0; nc<$nsubjects; nc++ ))
+    do
+
+        curr_id=$nc
+        subj=${subjects_list[$curr_id]}
+    
+        filename=$(basename "${subj}")
+        extension="${filename##*.}"
+        filename="${filename%.*}"
+
+	    echo ${listdir}/${filename}_aff.txt >> ${affine_list}   
+
+	    if [ -e "${subj}" ]
+        then
+            moving_name=${subj}
+        else
+            moving_name=${listdir}/${subj}
+        fi
+
+        moving_tensor="--moving_tensor ${moving_name}"
+
+        if [ ${start_step} -le 1 ] 
+        then
+            cmd="DTIREGAffine ${fixed_tensor} ${moving_tensor} "
+            joblist="${jobdir}/joblist_0affine_reg.txt"
+            jobname="affreg_${curr_id}_iter${count}"
+            jobscript=${jobdir}/job_${jobname}_qsub.sh
+            echo '#!/bin/bash'>${jobscript}
+            echo ${cmd}>>${jobscript}
+            echo ${jobname}>>${joblist}
+        fi
+    done
+
+    if [ ${start_step} -le 1 ]
+    then
+        submit_jobs_v9_wait ${joblist} ${stime} "8G" 1 ${jobdir} $((${njobs}*2)) ## only give one cpu per job
+    fi
+
+    if [ ${start_step} -le 1 ] 
+    then
+       
+       #echo AverageAffineTransformations2 ${affine_list} ${subjects} ${listdir}/average_template_affine_${count}.nii ${listdir}/average_affine.txt
+       cmd1="AverageAffineTransformations2 ${affine_list} ${subjects} ${listdir}/average_template_affine_${count}.nii ${listdir}/average_affine.txt"
+       cmd2="sed -i 's/MatrixOffsetTransformBase_double_3_3/AffineTransform_double_3_3/g' ${listdir}/average_affine.txt"
+       cmd3="InvertTransformation ${listdir}/average_affine.txt"
+       joblist="${jobdir}/joblist_1affine_average_txt.txt"
+       jobname="affavrg_txt_iter${count}"
+       jobscript=${jobdir}/job_${jobname}_qsub.sh
+       echo '#!/bin/bash'>${jobscript}
+       echo ${cmd1}>>${jobscript}
+       echo ${cmd2}>>${jobscript}
+       echo ${cmd3}>>${jobscript}
+       echo ${jobname}>>${joblist}
+       # submit average job
+       submit_jobs_v9_wait ${joblist} ${stime} "8G" 1 ${jobdir} 1
+        
+        curr_id=0
+    	for aff in `cat ${affine_list} `
+	    do
+            #echo CombineTransformations ${aff} ${listdir}/average_affine_inv.txt
+            cmd1="${scriptdir}/combine_two_txt.sh ${aff} ${listdir}/average_affine_inv.txt ${aff}"
+
+            subj=${subjects_list[$curr_id]}
+     	    filename=$(basename "${subj}")
+            extension="${filename##*.}"
+            filename="${filename%.*}"
+
+            #echo ApplyTransformationToTensor ${subj} $aff   ${listdir}/${filename}_aff.nii PPD ${listdir}/average_template_affine_${count}.nii
+            cmd2="ApplyTransformationToTensor ${subj} $aff ${listdir}/${filename}_aff.nii PPD ${listdir}/average_template_affine_${count}.nii"
+            let curr_id=curr_id+1
+            
+            joblist="${jobdir}/joblist_2affine_apply.txt"
+            jobname="affaply_${curr_id}_iter${count}"
+            jobscript="${jobdir}/job_${jobname}_qsub.sh"
+            echo '#!/bin/bash'>${jobscript}
+            echo ${cmd1}>>${jobscript}
+            echo ${cmd2}>>${jobscript}
+            echo "${jobname}">>${joblist}
+        done
+        submit_jobs_v9_wait ${joblist} ${stime} "8G" 1 ${jobdir} $((${njobs}*2))
+    fi
+
+
+    let count=count+1
+
+    if [ ${start_step} -le 1 ] 
+    then
+        #echo AverageTensors ${subjects_affine} ${listdir}/average_template_affine_${count}.nii 0
+        cmd="AverageTensors ${subjects_affine} ${listdir}/average_template_affine_${count}.nii 0"
+        joblist="${jobdir}/joblist_3affine_average_tensor.txt"
+        jobname="affavrg_DT_iter${count}"
+        jobscript=${jobdir}/job_${jobname}_qsub.sh
+        echo '#!/bin/bash'>${jobscript}
+        echo ${cmd}>>${jobscript}
+        echo "${jobname}">>${joblist}
+        submit_jobs_v9_wait ${joblist} ${stime} "8G" 1 ${jobdir} 1
+    fi
+done
+
+#if [ -e "${listdir}/average_affine_inv.txt" ]
+#then
+#        rm -rf ${listdir}/average_affine_inv.txt 
+#fi
+
+if [ -e "${listdir}/combined_affine.txt" ]
+then
+        rm -rf ${listdir}/combined_affine.txt
+fi
+
+#######################################################DIFFEOMORPHIC ALIGNMENT ###############################
+for subj in `cat ${subjects}`
+do
+    filename=$(basename "${subj}")
+    extension="${filename##*.}"
+    filename="${filename%.*}"
+	echo ${filename}_diffeo.nii >> ${subjects_diffeo}
+    echo ${listdir}/${filename}_deffield_MINV.nii >> ${deformation_fields}
+done
+
+# This has no use
+#let last_affine=${Niter_affine}+1
+
+jobdir="${listdir}/jobdir_weight"
+if [ -d ${jobdir} ]; then
+    rm -rf ${jobdir}
+    mkdir -p ${jobdir}
+else
+    mkdir -p ${jobdir}
+fi
+cmd1="AverageTensorsWithWeights ${subjects_affine}  ${listdir}/average_template_diffeo_0.nii 0 ${Niter}"
+cmd2="GaussianSmoothTensorImage ${listdir}/average_template_diffeo_0.nii 0.5"
+cmd3="mv ${listdir}/average_template_diffeo_0_SMTH.nii ${listdir}/average_template_diffeo_0.nii"
+joblist="${jobdir}/joblist_weight.txt"
+jobname="avrg_dt_w_weights"
+jobscript=${jobdir}/job_${jobname}_qsub.sh
+echo '#!/bin/bash'>${jobscript}
+echo ${cmd1}>>${jobscript}
+echo ${cmd2}>>${jobscript}
+echo ${cmd2}>>${jobscript}
+echo "${jobname}">>${joblist}
+submit_jobs_v9_wait ${joblist} ${stime} "16G" 2 ${jobdir} 1
+
+
+count=0
+
+while [ $count -lt ${Niter} ]
+do
+	#echo "Population average creation... Iteration $count"
+    template_name=${listdir}/average_template_diffeo_${count}.nii
+    
+    #echo dtireg_batch_register_to_target ${template_name} ${subjects} ${count}
+    #dtireg_batch_register_to_target ${template_name} ${subjects} ${count} ${njobs}
+    #echo dtireg_batch_register_to_target -t=${template_name} -s=${subjects} -d=${count} -n=${njobs} -a=0 -z=${output_combined}
+    jobdir=${listdir}/jobdir_diffeo_${count}
+    ${scriptdir}/dtireg_batch_register_to_target_PBS -t=${template_name} -s=${subjects} -d=${count} -n=${njobs} -a=0 -z=${output_combined} -o=${jobdir}
+    
+    if [ ${constrain_deformations} -eq 1 ]   
+    then
+
+         #echo AverageDeformationFields ${deformation_fields} ${listdir}/average_deffield.nii
+         cmd1="AverageDeformationFields ${deformation_fields} ${listdir}/average_deffield.nii"
+         cmd2="InvertTransformation ${listdir}/average_deffield.nii"
+         joblist="${jobdir}/joblist_1diffeo_average_df.txt"
+         jobname="df_avrg_df_${count}"
+         jobscript=${jobdir}/job_${jobname}_qsub.sh
+         echo '#!/bin/bash'>${jobscript}
+         echo ${cmd1}>>${jobscript}
+         echo ${cmd2}>>${jobscript}
+         echo ${jobname}>>${joblist}
+         # submit average job
+         submit_jobs_v9_wait ${joblist} ${ltime} "8G" 1 ${jobdir} 1
+
+         av_inv_name=${listdir}/average_deffield_inv.nii
+
+         curr_id=0
+         for subj in `cat ${subjects}`
+         do
+             filename=$(basename "${subj}")
+             extension="${filename##*.}"
+             filename="${filename%.*}"
+
+             cmd1="${scriptdir}/combine_two_trans.sh ${listdir}/${filename}_deffield_MINV.nii ${listdir}/average_deffield_inv.nii ${listdir}/${filename}_deffield_MINV.nii"
+             cmd2="${scriptdir}/combine_two_trans.sh ${listdir}/${filename}_aff.txt ${listdir}/${filename}_deffield_MINV.nii ${listdir}/${filename}_aff_deffield_MINV.nii"
+             cmd3="ApplyTransformationToTensor ${subj} ${listdir}/${filename}_aff_deffield_MINV.nii  ${listdir}/${filename}_diffeo.nii FS ${listdir}/average_template_diffeo_${count}.nii"
+             
+             joblist="${jobdir}/joblist_2diffeo_apply.txt"
+             jobname="df_aply_${curr_id}_${count}"
+             jobscript=${jobdir}/job_${jobname}_qsub.sh
+             echo '#!/bin/bash'>${jobscript}
+             echo ${cmd1}>>${jobscript}
+             echo ${cmd2}>>${jobscript}
+             echo ${cmd3}>>${jobscript}
+             echo "${jobname}">>${joblist}
+             let curr_id=curr_id+1
+         done
+         submit_jobs_v9_wait ${joblist} ${ltime} "8G" 2 ${jobdir} ${njobs}
+    fi
+
+    let count=count+1
+
+    #echo AverageTensorsWithWeights ${subjects_diffeo} ${listdir}/average_template_diffeo_${count}.nii  ${count} ${Niter}
+    cmd="AverageTensorsWithWeights ${subjects_diffeo} ${listdir}/average_template_diffeo_${count}.nii ${count} ${Niter}"
+    joblist="${jobdir}/joblist_3diffeo_average_tensor.txt"
+    jobname="dfavrg_DT_${count}"
+    jobscript=${jobdir}/job_${jobname}_qsub.sh
+    echo '#!/bin/bash'>${jobscript}
+    echo ${cmd}>>${jobscript}
+    echo "${jobname}">>${joblist}
+    submit_jobs_v9_wait ${joblist} ${ltime} "8G" 1 ${jobdir} 1
+done
